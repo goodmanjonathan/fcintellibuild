@@ -65,7 +65,8 @@ func listFilesChanged(path string) []string {
 	return fileList
 }
 
-func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []string, projects *[]string) {
+func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []string, projects *map[string][]string) {
+
 	defer wg.Done()
 
 	f, err := os.Open(cbprojPath)
@@ -76,14 +77,14 @@ func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []stri
 
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
 	for _, name := range changedFiles {
+		_, _ = f.Seek(0, 0)
+		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			if strings.Contains(scanner.Text(), name) {
 				mux.Lock()
-				*projects = append(*projects, cbprojPath)
+				(*projects)[cbprojPath] = append((*projects)[cbprojPath], name)
 				mux.Unlock()
-				return
 			}
 		}
 	}
@@ -117,7 +118,7 @@ func main() {
 		return nil
 	})
 
-	var projectsToCompile []string
+	projectsToCompile := make(map[string][]string)
 	var wg sync.WaitGroup
 	for _, projectFile := range cbprojSlice {
 		wg.Add(1)
@@ -126,6 +127,7 @@ func main() {
 
 	wg.Wait()
 
-	fmt.Println(projectsToCompile)
-	fmt.Println(changedFiles)
+	for proj, srcName := range projectsToCompile {
+		fmt.Printf("Compiling %v for files: %v\n", proj, srcName)
+	}
 }
