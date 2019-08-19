@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"github.com/libgit2/git2go"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +15,18 @@ import (
 )
 
 const (
-	CBPROJ = "cbproj"
-	CPP    = "cpp"
+	CBPROJ         = "cbproj"
+	CPP            = "cpp"
+	CONF_FILE_NAME = "fcintellibuild.json"
 )
 
-var mux = sync.Mutex{}
+// compare ProjectFileMap against `git status` to determine which projects to compile,
+// use len(ChangedProjectFiles) to determine whether or not project files need to be searched again
+type runConfig struct {
+	ProjectFileMap map[string][]string
+}
+
+var projectsMapMutex = sync.Mutex{}
 
 func parseArguments() (string, error) {
 	flag.Parse()
@@ -32,7 +41,7 @@ func parseArguments() (string, error) {
 	}
 }
 
-func listFilesChanged(path string) []string {
+func listFilesChanged(path string) (source, cbproj []string) {
 	repo, err := git.OpenRepository(path)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
@@ -44,7 +53,6 @@ func listFilesChanged(path string) []string {
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 	}
-	var fileList []string
 
 	// loop through git status output
 	for idx := 0; idx < count; idx++ {
@@ -58,11 +66,13 @@ func listFilesChanged(path string) []string {
 		fileName := filepath.Base(entry.IndexToWorkdir.OldFile.Path)
 		extension := strings.Split(fileName, ".")[1]
 		if extension == CPP {
-			fileList = append(fileList, filepath.Base(entry.IndexToWorkdir.OldFile.Path))
+			source = append(source, filepath.Base(entry.IndexToWorkdir.OldFile.Path))
+		} else if extension == CBPROJ {
+			cbproj = append(cbproj, filepath.Base(entry.IndexToWorkdir.OldFile.Path))
 		}
 	}
 
-	return fileList
+	return source, cbproj
 }
 
 func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []string, projects *map[string][]string) {
@@ -82,12 +92,40 @@ func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []stri
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			if strings.Contains(scanner.Text(), name) {
-				mux.Lock()
+				projectsMapMutex.Lock()
 				(*projects)[cbprojPath] = append((*projects)[cbprojPath], name)
-				mux.Unlock()
+				projectsMapMutex.Unlock()
 			}
 		}
 	}
+}
+
+func (conf *runConfig) gatherData(dir string) error {
+	jsonBuffer, err := ioutil.ReadFile(filepath.Join(dir, CONF_FILE_NAME))
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(jsonBuffer, conf)
+	return err
+}
+
+func strIntersectionEmpty(one, two []string) bool {
+	m := make(map[string]int)
+	for _, val := range one {
+		m[val]++
+	}
+
+	for _, val := range two {
+		m[val]++
+	}
+
+	for _, val := range m {
+		if val > 1 {
+			return false
+		}
+	}
+
+	return true
 }
 
 func main() {
@@ -96,36 +134,45 @@ func main() {
 		fmt.Println(err)
 	}
 
-	changedFiles := listFilesChanged(directory)
-	var cbprojSlice []string
+	var conf runConfig
+	confFillErr := conf.gatherData(directory)
 
-	err = filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
-		filename := filepath.Base(path)
-		splitFilename := strings.Split(filename, ".")
-		if info.IsDir() {
+	changedSourceFiles, changedCbprojFiles := listFilesChanged(directory)
+
+	if len(changedCbprojFiles) > 0 || confFillErr != nil {
+		var cbprojSlice []string
+
+		err = filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
+			filename := filepath.Base(path)
+			splitFilename := strings.Split(filename, ".")
+			if info.IsDir() {
+				return nil
+			}
+
+			if len(splitFilename) != 2 {
+				return nil
+			}
+
+			if splitFilename[1] != CBPROJ {
+				return nil
+			}
+
+			cbprojSlice = append(cbprojSlice, path)
 			return nil
+		})
+
+		projectsToCompile := make(map[string][]string)
+		var wg sync.WaitGroup
+		for _, projectFile := range cbprojSlice {
+			wg.Add(1)
+			go searchCbprojText(projectFile, &wg, changedSourceFiles, &projectsToCompile)
 		}
 
-		if len(splitFilename) != 2 {
-			return nil
-		}
+		wg.Wait()
 
-		if splitFilename[1] != CBPROJ {
-			return nil
-		}
+	} else {
 
-		cbprojSlice = append(cbprojSlice, path)
-		return nil
-	})
-
-	projectsToCompile := make(map[string][]string)
-	var wg sync.WaitGroup
-	for _, projectFile := range cbprojSlice {
-		wg.Add(1)
-		go searchCbprojText(projectFile, &wg, changedFiles, &projectsToCompile)
 	}
-
-	wg.Wait()
 
 	for proj, srcName := range projectsToCompile {
 		fmt.Printf("Compiling %v for files: %v\n", proj, srcName)
