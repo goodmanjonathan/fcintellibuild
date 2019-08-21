@@ -6,7 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/libgit2/git2go"
+	"gopkg.in/src-d/go-git.v4"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -21,7 +21,6 @@ const (
 )
 
 // compare ProjectFileMap against `git status` to determine which projects to compile,
-// use len(ChangedProjectFiles) to determine whether or not project files need to be searched again
 type runConfig struct {
 	ProjectFileMap map[string][]string
 }
@@ -42,33 +41,18 @@ func parseArguments() (string, error) {
 }
 
 func listFilesChanged(path string) (source, cbproj []string) {
-	repo, err := git.OpenRepository(path)
-	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	repo, _ := git.PlainOpen(path)
+	worktree, _ := repo.Worktree()
+	status, _ := worktree.Status()
 
-	statusListStruct, err := repo.StatusList(nil)
-	count, err := statusListStruct.EntryCount()
-	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-	}
-
-	// loop through git status output
-	for idx := 0; idx < count; idx++ {
-		entry, err := statusListStruct.ByIndex(idx)
-		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-
-		// filter out non source files
-		fileName := filepath.Base(entry.IndexToWorkdir.OldFile.Path)
-		extension := strings.Split(fileName, ".")[1]
-		if extension == CPP {
-			source = append(source, filepath.Base(entry.IndexToWorkdir.OldFile.Path))
-		} else if extension == CBPROJ {
-			cbproj = append(cbproj, filepath.Base(entry.IndexToWorkdir.OldFile.Path))
+	for pathToFile, fileStatus := range status {
+		fileExt := strings.Split(pathToFile, ".")[1]
+		if (fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified) && fileExt == CPP {
+			base := filepath.Base(pathToFile)
+			source = append(source, base)
+		} else if fileExt == CBPROJ {
+			base := filepath.Base(pathToFile)
+			cbproj = append(cbproj, base)
 		}
 	}
 
@@ -100,7 +84,7 @@ func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []stri
 	}
 }
 
-func (conf *runConfig) gatherData(dir string) error {
+func (conf *runConfig) marshall(dir string) error {
 	jsonBuffer, err := ioutil.ReadFile(filepath.Join(dir, CONF_FILE_NAME))
 	if err != nil {
 		return err
@@ -112,15 +96,11 @@ func (conf *runConfig) gatherData(dir string) error {
 func strIntersectionEmpty(one, two []string) bool {
 	m := make(map[string]int)
 	for _, val := range one {
-		m[val]++
+		m[val] = 1
 	}
 
 	for _, val := range two {
-		m[val]++
-	}
-
-	for _, val := range m {
-		if val > 1 {
+		if m[val] == 1 {
 			return false
 		}
 	}
@@ -135,9 +115,10 @@ func main() {
 	}
 
 	var conf runConfig
-	confFillErr := conf.gatherData(directory)
+	confFillErr := conf.marshall(directory)
 
 	changedSourceFiles, changedCbprojFiles := listFilesChanged(directory)
+	projectsToCompile := make(map[string][]string)
 
 	if len(changedCbprojFiles) > 0 || confFillErr != nil {
 		var cbprojSlice []string
@@ -161,7 +142,6 @@ func main() {
 			return nil
 		})
 
-		projectsToCompile := make(map[string][]string)
 		var wg sync.WaitGroup
 		for _, projectFile := range cbprojSlice {
 			wg.Add(1)
@@ -171,7 +151,11 @@ func main() {
 		wg.Wait()
 
 	} else {
-
+		for projectPath, filesList := range conf.ProjectFileMap {
+			if !strIntersectionEmpty(changedSourceFiles, filesList) {
+				projectsToCompile[projectPath] = filesList
+			}
+		}
 	}
 
 	for proj, srcName := range projectsToCompile {
