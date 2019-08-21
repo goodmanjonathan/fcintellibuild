@@ -44,16 +44,17 @@ func setFcEnv(lastTime int64, dir string) (int64, bool) {
 	}
 }
 
-func parseArguments() (string, error) {
+func parseArguments() (path string, runSetFcEnv bool, err error) {
+	flag.BoolVar(&runSetFcEnv, "setfcenv", false, "force SetFvEnv.cmd to run before compiling")
 	flag.Parse()
 	if flag.NArg() == 0 {
-		return "", errors.New("program requires a path to repo argument")
+		return "", runSetFcEnv, errors.New("program requires a path to repo argument")
 	} else {
 		path, err := filepath.Abs(flag.Args()[0])
 		if err != nil {
-			return "", err
+			return "", runSetFcEnv, err
 		}
-		return path, nil
+		return path, runSetFcEnv, nil
 	}
 }
 
@@ -175,7 +176,7 @@ func fcmsbuild(projects map[string][]string, pause bool) {
 }
 
 func main() {
-	directory, err := parseArguments()
+	directory, RunSetFcEnv, err := parseArguments()
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -226,7 +227,12 @@ func main() {
 		}
 	}
 
-	conf.lastSetFcEnvTime, _ = setFcEnv(conf.lastSetFcEnvTime, directory)
+	if RunSetFcEnv {
+		conf.lastSetFcEnvTime, _ = setFcEnv(0, directory)
+	} else {
+		conf.lastSetFcEnvTime, _ = setFcEnv(conf.lastSetFcEnvTime, directory)
+	}
+
 	conf.marshallAndWrite(directory)
 	fcmsbuild(projectsToCompile, true)
 }
