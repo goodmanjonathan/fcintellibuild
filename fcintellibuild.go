@@ -9,23 +9,40 @@ import (
 	"gopkg.in/src-d/go-git.v4"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
 	CBPROJ         = "cbproj"
 	CPP            = "cpp"
 	CONF_FILE_NAME = "fcintellibuild.json"
+	nanosecondHour = 3600000000000
+	setFcEnvName   = "SetFcEnv.cmd"
 )
 
 // compare ProjectFileMap against `git status` to determine which projects to compile,
 type runConfig struct {
-	ProjectFileMap map[string][]string
+	ProjectFileMap   map[string][]string
+	lastSetFcEnvTime int64
 }
 
 var projectsMapMutex = sync.Mutex{}
+
+func setFcEnv(lastTime int64, dir string) (int64, bool) {
+	timeNow := time.Now()
+	unixTimeNow := timeNow.UnixNano()
+	if unixTimeNow-lastTime > 4*nanosecondHour {
+		setfcenv := exec.Command(filepath.Join(dir, setFcEnvName))
+		setfcenv.Run()
+		return unixTimeNow, true
+	} else {
+		return lastTime, false
+	}
+}
 
 func parseArguments() (string, error) {
 	flag.Parse()
@@ -84,13 +101,27 @@ func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []stri
 	}
 }
 
-func (conf *runConfig) marshall(dir string) error {
+func (conf *runConfig) unmarshall(dir string) error {
 	jsonBuffer, err := ioutil.ReadFile(filepath.Join(dir, CONF_FILE_NAME))
 	if err != nil {
 		return err
 	}
 	err = json.Unmarshal(jsonBuffer, conf)
 	return err
+}
+
+func (conf *runConfig) marshallAndWrite(dir string) error {
+	jsonBuffer, err := json.Marshal(conf)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(filepath.Join(dir, CONF_FILE_NAME), jsonBuffer, 777)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func strIntersectionEmpty(one, two []string) bool {
@@ -108,6 +139,41 @@ func strIntersectionEmpty(one, two []string) bool {
 	return true
 }
 
+func fcmsbuild(projects map[string][]string, pause bool) {
+	if pause {
+
+		for proj, srcName := range projects {
+			fmt.Printf("Found %v for files: %v\n", proj, srcName)
+		}
+
+		fmt.Println("\n--------------")
+
+		reader := bufio.NewReader(os.Stdin)
+		for proj, sources := range projects {
+			fmt.Printf("Build %v for files %v?  ::  y/n/q  ::  ", proj, sources)
+			input, _ := reader.ReadString('\n')
+			if input[0] == 'y' {
+				cmd := exec.Command("%FCMSBUILD%", proj)
+				cmd.Run()
+			} else if input[0] == 'q' {
+				os.Exit(1)
+			} else {
+				continue
+			}
+		}
+	} else {
+		for proj, sources := range projects {
+			fmt.Printf("Building %v for files %v.", proj, sources)
+			cmd := exec.Command("%FCMSBUILD%", proj)
+			cmd.Run()
+		}
+
+		for proj, srcName := range projects {
+			fmt.Printf("Compiled %v for files: %v\n", proj, srcName)
+		}
+	}
+}
+
 func main() {
 	directory, err := parseArguments()
 	if err != nil {
@@ -115,7 +181,7 @@ func main() {
 	}
 
 	var conf runConfig
-	confFillErr := conf.marshall(directory)
+	confFillErr := conf.unmarshall(directory)
 
 	changedSourceFiles, changedCbprojFiles := listFilesChanged(directory)
 	projectsToCompile := make(map[string][]string)
@@ -150,6 +216,8 @@ func main() {
 
 		wg.Wait()
 
+		conf.ProjectFileMap = projectsToCompile
+
 	} else {
 		for projectPath, filesList := range conf.ProjectFileMap {
 			if !strIntersectionEmpty(changedSourceFiles, filesList) {
@@ -158,7 +226,7 @@ func main() {
 		}
 	}
 
-	for proj, srcName := range projectsToCompile {
-		fmt.Printf("Compiling %v for files: %v\n", proj, srcName)
-	}
+	conf.lastSetFcEnvTime, _ = setFcEnv(conf.lastSetFcEnvTime, directory)
+	conf.marshallAndWrite(directory)
+	fcmsbuild(projectsToCompile, true)
 }
