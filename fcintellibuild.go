@@ -17,11 +17,12 @@ import (
 )
 
 const (
-	CBPROJ         = "cbproj"
-	CPP            = "cpp"
-	CONF_FILE_NAME = "fcintellibuild.json"
-	nanosecondHour = 3600000000000
-	setFcEnvName   = "SetFcEnv.cmd"
+	cbprojExt          = "cbproj"
+	cppExt             = "cpp"
+	confFileName       = "fcintellibuild.json"
+	nanosecondHour     = 3600000000000
+	setFcEnvName       = "SetFcEnv"
+	defaultThreadCount = 3
 )
 
 // compare ProjectFileMap against `git status` to determine which projects to compile,
