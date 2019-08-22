@@ -168,8 +168,15 @@ func build(projects map[string][]string, noPause, postClang bool, threadcount in
 			fmt.Printf("Build %v for files %v?  ::  y/n/q  ::  ", proj, sources)
 			input, _ := reader.ReadString('\n')
 			if input[0] == 'y' {
-				cmd := exec.Command("%FCMSBUILD%", proj)
-				cmd.Run()
+				var cmd *exec.Cmd
+				if postClang {
+					cmd = exec.Command(os.ExpandEnv("%FCMSBUILD%"), proj)
+				} else {
+					cmd = exec.Command("\"c:\\Program Files (x86)\\JomiTech\\TwineCompile\\jtmake.exe\"", "-B", "-ide102", proj, string(threadcount))
+				}
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				_ = cmd.Run()
 			} else if input[0] == 'q' {
 				os.Exit(1)
 			} else {
@@ -178,8 +185,15 @@ func build(projects map[string][]string, noPause, postClang bool, threadcount in
 		}
 	} else {
 		for proj, sources := range projects {
-			fmt.Printf("Building %v for files %v.", proj, sources)
-			cmd := exec.Command("%FCMSBUILD%", proj)
+			fmt.Printf("Building %v for files %v.\n", proj, sources)
+			var cmd *exec.Cmd
+			if postClang {
+				cmd = exec.Command(os.ExpandEnv("%FCMSBUILD%"), proj)
+			} else {
+				cmd = exec.Command("\"c:\\Program Files (x86)\\JomiTech\\TwineCompile\\jtmake.exe\"", "-B", "-ide102", proj, string(threadcount))
+			}
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
 			cmd.Run()
 		}
 
