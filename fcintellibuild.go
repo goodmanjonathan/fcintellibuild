@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,34 +29,44 @@ const (
 // compare ProjectFileMap against `git status` to determine which projects to compile,
 type runConfig struct {
 	ProjectFileMap   map[string][]string
-	lastSetFcEnvTime int64
+	LastSetFcEnvTime string
+	ThreadCount      int
 }
 
 var projectsMapMutex = sync.Mutex{}
 
-func setFcEnv(lastTime int64, dir string) (int64, bool) {
+func setFcEnv(strLastTime string, dir string) (string, bool) {
+
+	lastTime, err := strconv.ParseInt(strLastTime, 10, 64)
+
 	timeNow := time.Now()
 	unixTimeNow := timeNow.UnixNano()
-	if unixTimeNow-lastTime > 4*nanosecondHour {
+	if unixTimeNow-lastTime > 4*nanosecondHour || err != nil {
 		setfcenv := exec.Command(filepath.Join(dir, setFcEnvName))
-		setfcenv.Run()
-		return unixTimeNow, true
+		setfcenv.Stdout = os.Stdout
+		setfcenv.Stderr = os.Stderr
+		_ = setfcenv.Run()
+		return strconv.FormatInt(unixTimeNow, 10), true
 	} else {
-		return lastTime, false
+		return strconv.FormatInt(lastTime, 10), false
 	}
 }
 
-func parseArguments() (path string, runSetFcEnv bool, err error) {
-	flag.BoolVar(&runSetFcEnv, "setfcenv", false, "force SetFvEnv.cmd to run before compiling")
+func parseArguments() (path string, runSetFcEnv, preclang, yesBuild bool, threadCount int, err error) {
+	flag.BoolVar(&runSetFcEnv, "set-fc-env", false, "force SetFvEnv.cmd to run before compiling")
+	flag.BoolVar(&preclang, "pre-clang", false, "use the pre-Clang build syntax (i.e. not %FCMSBUILD%)")
+	flag.BoolVar(&yesBuild, "yes-build", false, "build each project without confirmation")
+	flag.IntVar(&threadCount, "thread-count", defaultThreadCount, "choose a threadcount for pre-clang builds. "+
+		""+strconv.Itoa(defaultThreadCount)+" is default, and changes will be remembered.")
 	flag.Parse()
 	if flag.NArg() == 0 {
-		return "", runSetFcEnv, errors.New("program requires a path to repo argument")
+		return "", runSetFcEnv, preclang, yesBuild, threadCount, errors.New("program requires a path to repo argument")
 	} else {
 		path, err := filepath.Abs(flag.Args()[0])
 		if err != nil {
-			return "", runSetFcEnv, err
+			return "", runSetFcEnv, preclang, yesBuild, threadCount, err
 		}
-		return path, runSetFcEnv, nil
+		return path, runSetFcEnv, preclang, yesBuild, threadCount, nil
 	}
 }
 
@@ -66,10 +77,10 @@ func listFilesChanged(path string) (source, cbproj []string) {
 
 	for pathToFile, fileStatus := range status {
 		fileExt := strings.Split(pathToFile, ".")[1]
-		if (fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified) && fileExt == CPP {
+		if (fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified) && fileExt == cppExt {
 			base := filepath.Base(pathToFile)
 			source = append(source, base)
-		} else if fileExt == CBPROJ {
+		} else if fileExt == cbprojExt {
 			base := filepath.Base(pathToFile)
 			cbproj = append(cbproj, base)
 		}
@@ -104,7 +115,7 @@ func searchCbprojText(cbprojPath string, wg *sync.WaitGroup, changedFiles []stri
 }
 
 func (conf *runConfig) unmarshall(dir string) error {
-	jsonBuffer, err := ioutil.ReadFile(filepath.Join(dir, CONF_FILE_NAME))
+	jsonBuffer, err := ioutil.ReadFile(filepath.Join(dir, confFileName))
 	if err != nil {
 		return err
 	}
@@ -118,8 +129,9 @@ func (conf *runConfig) marshallAndWrite(dir string) error {
 		return err
 	}
 
-	err = ioutil.WriteFile(filepath.Join(dir, CONF_FILE_NAME), jsonBuffer, 777)
+	err = ioutil.WriteFile(filepath.Join(dir, confFileName), jsonBuffer, 0644)
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
 
@@ -141,8 +153,9 @@ func strIntersectionEmpty(one, two []string) bool {
 	return true
 }
 
-func fcmsbuild(projects map[string][]string, pause bool) {
-	if pause {
+func build(projects map[string][]string, noPause, postClang bool, threadcount int) {
+
+	if !noPause {
 
 		for proj, srcName := range projects {
 			fmt.Printf("Found %v for files: %v\n", proj, srcName)
@@ -177,13 +190,19 @@ func fcmsbuild(projects map[string][]string, pause bool) {
 }
 
 func main() {
-	directory, RunSetFcEnv, err := parseArguments()
+	directory, RunSetFcEnv, preClang, buildWithoutAsking, threadCount, err := parseArguments()
 	if err != nil {
 		fmt.Println(err)
 	}
 
 	var conf runConfig
 	confFillErr := conf.unmarshall(directory)
+
+	if threadCount != defaultThreadCount {
+		conf.ThreadCount = threadCount
+	} else if conf.ThreadCount == 0 {
+		conf.ThreadCount = defaultThreadCount
+	}
 
 	changedSourceFiles, changedCbprojFiles := listFilesChanged(directory)
 	projectsToCompile := make(map[string][]string)
@@ -202,7 +221,7 @@ func main() {
 				return nil
 			}
 
-			if splitFilename[1] != CBPROJ {
+			if splitFilename[1] != cbprojExt {
 				return nil
 			}
 
@@ -229,11 +248,12 @@ func main() {
 	}
 
 	if RunSetFcEnv {
-		conf.lastSetFcEnvTime, _ = setFcEnv(0, directory)
+		conf.LastSetFcEnvTime, _ = setFcEnv("0", directory)
 	} else {
-		conf.lastSetFcEnvTime, _ = setFcEnv(conf.lastSetFcEnvTime, directory)
+		conf.LastSetFcEnvTime, _ = setFcEnv(conf.LastSetFcEnvTime, directory)
 	}
 
-	conf.marshallAndWrite(directory)
-	fcmsbuild(projectsToCompile, true)
+	_ = conf.marshallAndWrite(directory)
+
+	build(projectsToCompile, buildWithoutAsking, preClang, threadCount)
 }
